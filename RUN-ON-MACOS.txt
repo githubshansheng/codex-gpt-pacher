@@ -1,0 +1,45 @@
+Codex GPT-5.6 patch - macOS first run
+
+macOS may block patch-macos.command before it can run because downloaded files
+carry the com.apple.quarantine attribute.
+
+Open Terminal, change the path below to the extracted patch directory, then run:
+
+cd ~/Downloads/codex-gpt56-patcher
+xattr -dr com.apple.quarantine .
+chmod +x patch-macos.command
+./patch-macos.command
+
+Alternative full-patch command without opening the .command file:
+
+cd ~/Downloads/codex-gpt56-patcher
+xattr -dr com.apple.quarantine .
+python3 patch_codex_gpt56.py --yes
+
+The full patch creates a separate patched application by default:
+
+~/Applications/Codex-GPT56-Patched.app
+
+It patches the copied app.asar, keeps app.asar.original plus a timestamped
+app.asar backup inside the patched copy, verifies the modified archive, and
+then applies an ad-hoc signature to the patched copy. The official app in
+/Applications remains unchanged.
+
+Launch the patched app with:
+
+open ~/Applications/Codex-GPT56-Patched.app
+
+GPT-5.6 Sol is selected by default, the active third-party provider is adjusted
+for API-key/no-ChatGPT-login mode, and Ultra is shown by default. If your
+provider rejects reasoning.effort=ultra, run:
+
+python3 patch_codex_gpt56.py --disable-ultra --yes
+
+If Python is unavailable but Node.js is installed, configuration-only mode is:
+
+cd ~/Downloads/codex-gpt56-patcher
+xattr -dr com.apple.quarantine .
+node configure_codex_gpt56.mjs --yes
+
+Do not disable Gatekeeper globally. Only remove quarantine from this patch
+directory after confirming that it is the directory you intended to run.

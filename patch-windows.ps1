@@ -5,6 +5,7 @@ $patchScript = Join-Path $scriptDir "patch_codex_gpt56.py"
 $storeScript = Join-Path $scriptDir "patch-windows-store.ps1"
 $configScript = Join-Path $scriptDir "configure_codex_gpt56.mjs"
 $forwardedArgs = @($args)
+$runGuided = $forwardedArgs.Count -eq 0
 
 function Has-Argument([string]$name) {
     return @($forwardedArgs | Where-Object { $_ -eq $name -or $_ -like "$name=*" }).Count -gt 0
@@ -21,6 +22,37 @@ function Get-ArgumentValue([string]$name) {
         }
     }
     return $null
+}
+
+function Read-YesNo([string]$prompt, [bool]$defaultYes) {
+    if ([Console]::IsInputRedirected) {
+        return $defaultYes
+    }
+    $suffix = if ($defaultYes) { "[Y/n]" } else { "[y/N]" }
+    while ($true) {
+        $answer = (Read-Host "$prompt $suffix").Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $defaultYes
+        }
+        if (@("y", "yes", "1", "true") -contains $answer) {
+            return $true
+        }
+        if (@("n", "no", "0", "false") -contains $answer) {
+            return $false
+        }
+        Write-Host "Please answer y or n."
+    }
+}
+
+function Read-TextWithDefault([string]$prompt, [string]$defaultValue) {
+    if ([Console]::IsInputRedirected) {
+        return $defaultValue
+    }
+    $answer = Read-Host "$prompt`n  Default: $defaultValue`n>"
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        return $defaultValue
+    }
+    return $answer.Trim()
 }
 
 function Quote-ProcessArgument([string]$value) {
@@ -104,7 +136,15 @@ elseif ($null -ne $python) {
 }
 elseif ($null -ne $node) {
     Write-Host "Python was not found. Running the Node.js configuration-only fallback."
-    & $node.Source $configScript "--yes" @forwardedArgs
+    $nodeArgs = @($configScript)
+    if ($runGuided -or (Has-Argument "--guided")) {
+        $nodeArgs += "--guided"
+    }
+    else {
+        $nodeArgs += "--yes"
+    }
+    $nodeArgs += $forwardedArgs
+    & $node.Source @nodeArgs
     exit $LASTEXITCODE
 }
 else {
@@ -113,6 +153,22 @@ else {
 }
 
 $storePackage = Get-AppxPackage OpenAI.Codex -ErrorAction SilentlyContinue
+if ($runGuided -and $null -ne $storePackage) {
+    $sourceApp = Join-Path $storePackage.InstallLocation "app"
+    Write-Host "Microsoft Store Codex detected:"
+    Write-Host "  $($storePackage.InstallLocation)"
+    if (-not (Read-YesNo "Repackage and replace the original Store install identity/shortcut?" $true)) {
+        $defaultOutput = Join-Path $env:USERPROFILE "Applications\Codex-GPT56-Patched"
+        $cloneOutput = Read-TextWithDefault "Enter the independent Codex clone install path" $defaultOutput
+        Write-Host "The new independent clone will be installed at:"
+        Write-Host "  $cloneOutput"
+        $forwardedArgs = @("--app", $sourceApp, "--output", $cloneOutput, "--guided")
+        $runGuided = $false
+    }
+    else {
+        Write-Host "The Store package will be rebuilt and installed as a same-identity local update."
+    }
+}
 $explicitApp = Get-ArgumentValue "--app"
 $explicitStoreApp = $false
 if ($null -ne $explicitApp -and $null -ne $storePackage) {
@@ -144,7 +200,14 @@ if ($storeMode -and -not (Has-Argument "--dry-run")) {
 
     if (-not (Has-Argument "--desktop-only")) {
         Write-Host "Updating the current user's model catalog and config..."
-        $catalogArgs = @($patchScript, "--catalog-only", "--yes") + $forwardedArgs
+        $catalogArgs = @($patchScript, "--catalog-only")
+        if ((Has-Argument "--guided") -and -not $runGuided) {
+            $catalogArgs += "--guided"
+        }
+        else {
+            $catalogArgs += "--yes"
+        }
+        $catalogArgs += $forwardedArgs
         $exitCode = Invoke-Python $pythonPath $pythonBaseArgs $catalogArgs
         if ($exitCode -ne 0) {
             exit $exitCode
@@ -182,5 +245,12 @@ if ($storeMode -and -not (Has-Argument "--dry-run")) {
     exit 0
 }
 
-$directArgs = @($patchScript, "--yes") + $forwardedArgs
+$directArgs = @($patchScript)
+if ($runGuided -or (Has-Argument "--guided")) {
+    $directArgs += "--guided"
+}
+else {
+    $directArgs += "--yes"
+}
+$directArgs += $forwardedArgs
 exit (Invoke-Python $pythonPath $pythonBaseArgs $directArgs)

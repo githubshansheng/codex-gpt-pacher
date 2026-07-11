@@ -9,7 +9,7 @@
 - `app-server model/list`（桌面模型列表接口）已经返回 GPT-5.6，Desktop 前端仍将它过滤掉。
 - model catalog 已声明 `max`（最大推理量），Desktop 推理强度下拉仍只显示到 `xhigh`（极高）。
 
-普通安装的完整补丁默认创建独立应用副本，不直接覆盖官方安装目录。Windows Store/MSIX 版本继续使用当前项目的同身份更新包方案，以保留开始菜单和任务栏快捷方式身份。
+普通安装的完整补丁默认创建独立应用副本，不直接覆盖官方安装目录。Windows Store/MSIX 版本会在向导中询问是否重打包并替换原 Store 安装身份；如果不替换，会改为创建独立补丁分身并显示新的安装路径。
 
 ## 先看结论
 
@@ -19,6 +19,33 @@
 | --- | --- | --- | --- | --- | --- |
 | 完整补丁模式 | Python 3.10+、Node.js 20+、npm/npx | 是 | 是 | 按需 | 是 |
 | 配置模式 | Node.js 20+ | 否 | 是 | 按需 | 不一定 |
+
+## 新手向导
+
+不熟悉命令行参数时，直接运行系统入口即可进入向导：
+
+| 系统 | 入口 |
+| --- | --- |
+| Windows | 双击 `patch-windows.cmd` |
+| macOS | 双击 `patch-macos.command`，或在 Terminal 执行 `./patch-macos.command` |
+| Linux | 执行 `./patch-linux.sh` |
+
+向导会依次确认：
+
+- 是否修改 Desktop 前端和模型配置。
+- 自动识别到的 Codex / ChatGPT 安装目录是否正确；不正确时可以手动输入安装目录、`.app`、AppImage、可执行文件或 `app.asar`。
+- 补丁分身安装路径；可以使用默认路径，也可以输入自定义路径来创建多个分身。
+- 是否写入默认第三方 provider。默认 `base_url` 为：
+
+```text
+https://ai.heigh.vip/v1
+```
+
+已经习惯参数模式的用户不受影响。只要传入任意参数，入口脚本仍按原来的自动化方式运行，例如：
+
+```bash
+python3 patch_codex_gpt56.py --app "/path/to/Codex.app" --output "/custom/path/Codex-GPT56-Patched.app" --yes
+```
 
 没有 Python 时，Windows、macOS、Linux 入口会自动改用纯 `Node.js`（JavaScript 运行环境）的配置助手：
 
@@ -95,7 +122,7 @@ resources/app.asar.backup-YYYYMMDD-HHMMSS
 
 如果写入或验证失败，脚本会用最新的 `app.asar.backup-*` 自动恢复。
 
-Windows Store / MSIX 安装目录受 AppX 部署服务保护，管理员也不能直接覆盖其中的 `app.asar`。Windows 一键入口在未指定 `--output` 时会保留当前项目的同身份更新流程：
+Windows Store / MSIX 安装目录受 AppX 部署服务保护，管理员也不能直接覆盖其中的 `app.asar`。Windows 一键入口在无参数运行时会先进入向导，询问是否重打包并替换原 Store 安装身份。选择替换时会保留当前项目的同身份更新流程：
 
 - 从当前 Store 包生成干净构建目录。
 - 在构建目录中补丁 `app.asar`。
@@ -119,7 +146,7 @@ OpenAI.Codex_2p2nqsd0c76g0!App
 
 成功部署并完成哈希校验后，临时构建目录 `<磁盘>:\CodexGPT56Patcher\build-*` 会自动清理；如果打包、签名或部署失败，构建目录会保留，方便排查和手动清理。最终可回退的安装包仍保留在 `packages` 目录中。
 
-如需绕过 Store 同身份更新流程，也可以显式使用 `--output` 创建独立副本。
+如需绕过 Store 同身份更新流程，可以在向导中选择“不替换原安装身份”，或显式使用 `--output` 创建独立副本。选择独立副本时，脚本会显示新的安装路径，例如 `%USERPROFILE%\Applications\Codex-GPT56-Patched`。
 
 ### 2. 修改模型白名单过滤
 
@@ -281,24 +308,29 @@ model = "gpt-5.6-sol"
 --default-model luna
 ```
 
+脚本会为新手准备默认第三方 provider。默认 provider 名称为 `custom`，默认 `base_url` 为：
+
+```toml
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://ai.heigh.vip/v1"
+wire_api = "responses"
+env_key = "CODEX_CUSTOM_API_KEY"
+```
+
+如果当前没有激活 provider，或激活的是 `openai` / `chatgpt` 官方 provider，脚本会创建并激活上面的 `custom` provider。如果当前已经激活了其他第三方 provider，脚本会保留原 `base_url`，只补齐缺失字段；只有在向导中输入新地址或显式传入 `--base-url` 时才覆盖已有第三方地址。
+
 对当前激活的第三方 provider，脚本会自动启用 API-key/no-ChatGPT-login 模式：
 
 ```toml
 requires_openai_auth = false
 ```
 
-如果激活的是 `openai` / `chatgpt` provider，或该 provider 的 `base_url` 指向 `https://api.openai.com`，脚本不会改写登录要求。
+如果 provider 的 `base_url` 指向 `https://api.openai.com`，脚本不会把它当作第三方 API-key provider 启用未登录模式。
 
-工具不会自动修改以下内容：
-
-```toml
-model_provider
-base_url
-wire_api
-env_key
-```
-
-也不会读取、复制或迁移 API Key。
+工具不会读取、复制、输出或迁移 API Key。用户仍需要自行设置 `CODEX_CUSTOM_API_KEY` 或对应 provider 的环境变量。
 
 ### 7. 自动备份
 
@@ -370,6 +402,18 @@ app-server model/list
 | `patch-linux.sh` | Linux 入口，自动选择 Python 或 Node.js |
 | `patch-unix.sh` | 通用 Unix 入口 |
 
+## 多个 Codex 分身
+
+每次运行补丁时都可以选择不同的 `--output` 或在向导中输入不同安装路径，例如：
+
+```text
+%USERPROFILE%\Applications\Codex-GPT56-Work
+%USERPROFILE%\Applications\Codex-GPT56-Personal
+%USERPROFILE%\Applications\Codex-GPT56-Test
+```
+
+这样可以在一台机器上保留多个补丁分身，用于不同中转站、不同配置或不同测试版本。若要把它们用于多个 Codex 账号，建议为每个分身配合独立的 `CODEX_HOME`、系统用户或启动环境管理配置与 API Key。仅复制应用目录不等于强制隔离所有 Electron 登录态；实际账号隔离取决于 Codex Desktop 使用的数据目录。
+
 ## 环境要求
 
 ### 完整补丁模式
@@ -440,6 +484,8 @@ patch-windows.cmd
 3. 没有 Python 时查找 `node`，进入配置模式。
 4. Python 和 Node.js 都不存在时停止并显示安装提示。
 
+无参数双击会进入向导。向导会允许使用自动识别到的安装目录，也可以手动输入 Codex 安装目录；还会询问补丁分身输出路径。
+
 普通 Windows 目录安装默认生成到：
 
 ```text
@@ -452,9 +498,11 @@ patch-windows.cmd
 %USERPROFILE%\Applications\Codex-GPT56-Patched\ChatGPT.exe
 ```
 
-Microsoft Store 版本在未指定 `--output` 时会弹出 UAC 提权窗口。脚本不会直接写入受保护的 `WindowsApps` 文件，而是生成并安装同身份的 MSIX 更新包。
+Microsoft Store 版本在无参数运行时会先询问是否替换原 Store 安装身份。选择替换时会弹出 UAC 提权窗口。脚本不会直接写入受保护的 `WindowsApps` 文件，而是生成并安装同身份的 MSIX 更新包。
 
 完成后仍从原来的开始菜单入口启动 Codex。
+
+如果选择不替换原安装身份，向导会要求确认新的独立分身路径，并在执行前显示该路径。完成后从这个新路径启动补丁版 Codex。
 
 MSIX 重打包需要 `makeappx.exe` 和 `signtool.exe`。脚本会优先使用本机已安装的 Windows 10/11 SDK；如果没有安装 SDK，会自动从微软官方 NuGet 下载 `Microsoft.Windows.SDK.BuildTools`，优先选择兼容 Windows 10/11 的 `10.0.26100.*` 稳定版本。
 
@@ -604,6 +652,18 @@ python3 patch_codex_gpt56.py \
 
 ## 常用命令
 
+### 启动新手向导
+
+```bash
+python3 patch_codex_gpt56.py --guided
+```
+
+Windows 可以直接双击：
+
+```text
+patch-windows.cmd
+```
+
 ### 预览识别结果，不写文件
 
 ```bash
@@ -638,6 +698,22 @@ python3 patch_codex_gpt56.py \
 ```
 
 `--output` 会指定补丁副本位置，不修改普通官方安装目录。
+
+### 指定中转地址
+
+默认中转地址为：
+
+```text
+https://ai.heigh.vip/v1
+```
+
+如果要改成其他地址：
+
+```bash
+python3 patch_codex_gpt56.py \
+  --base-url "https://your-api.example/v1" \
+  --yes
+```
 
 ### 只更新模型配置
 
@@ -740,7 +816,7 @@ node configure_codex_gpt56.mjs --self-test
 
 ## 第三方 API 配置示例
 
-本工具不会自动填写 API 地址和密钥。第三方 `Responses API` 配置仍由用户维护。
+本工具默认会准备 `custom` provider，并把 `base_url` 指向 `https://ai.heigh.vip/v1`。API Key 不会被脚本读取或填写，仍由用户通过环境变量维护。
 
 示例：
 
@@ -752,7 +828,7 @@ model_catalog_json = "C:/Users/your-name/.codex/model_catalog.json"
 
 [model_providers.custom]
 name = "custom"
-base_url = "https://your-api.example/v1"
+base_url = "https://ai.heigh.vip/v1"
 wire_api = "responses"
 env_key = "CODEX_CUSTOM_API_KEY"
 ```

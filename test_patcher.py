@@ -66,6 +66,55 @@ class FullNoLoginModeTests(unittest.TestCase):
             self.assertFalse(changed)
             self.assertEqual(config.read_text(encoding="utf-8"), original)
 
+    def test_default_relay_provider_is_created_for_official_config(self):
+        original = (
+            'model_provider = "openai"\n'
+            '[model_providers.openai]\n'
+            'name = "OpenAI"\n'
+            'base_url = "https://api.openai.com/v1"\n'
+        )
+        updated, changed, provider = patcher.configure_default_provider_text(
+            original,
+            provider=patcher.DEFAULT_PROVIDER,
+            base_url=patcher.DEFAULT_BASE_URL,
+        )
+        updated, no_login_changed, no_login_provider = patcher.enable_no_chatgpt_login_mode_text(updated, provider)
+        self.assertTrue(changed)
+        self.assertFalse(no_login_changed)
+        self.assertEqual(provider, "custom")
+        self.assertIsNone(no_login_provider)
+        self.assertIn('model_provider = "custom"', updated)
+        self.assertIn('base_url = "https://ai.heigh.vip/v1"', updated)
+        self.assertIn("requires_openai_auth = false", updated)
+
+    def test_existing_third_party_base_url_is_preserved_unless_forced(self):
+        original = (
+            'model_provider = "custom"\n'
+            '[model_providers.custom]\n'
+            'name = "custom"\n'
+            'base_url = "https://third-party.example/v1"\n'
+            'wire_api = "responses"\n'
+            'env_key = "CODEX_CUSTOM_API_KEY"\n'
+        )
+        updated, changed, provider = patcher.configure_default_provider_text(
+            original,
+            provider=patcher.DEFAULT_PROVIDER,
+            base_url=patcher.DEFAULT_BASE_URL,
+        )
+        self.assertFalse(changed)
+        self.assertEqual(provider, "custom")
+        self.assertIn('base_url = "https://third-party.example/v1"', updated)
+
+        updated, changed, provider = patcher.configure_default_provider_text(
+            original,
+            provider=patcher.DEFAULT_PROVIDER,
+            base_url=patcher.DEFAULT_BASE_URL,
+            force_base_url=True,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(provider, "custom")
+        self.assertIn('base_url = "https://ai.heigh.vip/v1"', updated)
+
     def test_windows_invocation_json_round_trips_chinese_paths(self):
         shell = shutil.which("powershell") or shutil.which("pwsh")
         if shell is None:

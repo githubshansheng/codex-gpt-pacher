@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { stdin as input, stdout as output } from "node:process"
+import readline from "node:readline/promises"
 
 const MODEL_TIERS = {
   sol: ["gpt-5.6-sol", "GPT-5.6 Sol"],
@@ -19,6 +21,12 @@ const EFFORT_DESCRIPTIONS = {
   max: "Maximum reasoning depth for the hardest problems",
   ultra: "Ultra parallel reasoning; requires explicit provider support",
 }
+
+const DEFAULT_PROVIDER = "custom"
+const DEFAULT_BASE_URL = "https://ai.heigh.vip/v1"
+const DEFAULT_WIRE_API = "responses"
+const DEFAULT_ENV_KEY = "CODEX_CUSTOM_API_KEY"
+const OFFICIAL_PROVIDERS = new Set(["openai", "chatgpt"])
 
 function log(message) {
   console.log(`[codex-gpt56-config] ${message}`)
@@ -52,6 +60,10 @@ Options:
   --tiers sol,terra,luna         Models to add or update
   --default-model keep|sol|terra|luna
                                  Default to GPT-5.6 Sol; use keep to preserve
+  --provider NAME                Provider to create or activate; default custom
+  --base-url URL                 Provider base_url; default https://ai.heigh.vip/v1
+  --skip-provider-config         Do not create/update provider/base_url settings
+  --guided                       Start a beginner-friendly interactive setup
   --enable-ultra                 Accepted for compatibility; Ultra is default
   --disable-ultra                Hide Ultra for providers that reject it
   --dry-run                      Report paths without writing
@@ -68,8 +80,12 @@ function parseArgs(argv) {
     catalog: null,
     tiers: "sol,terra,luna",
     defaultModel: "sol",
+    provider: null,
+    baseUrl: null,
+    skipProviderConfig: false,
     enableUltra: true,
     dryRun: false,
+    guided: false,
     selfTest: false,
   }
 
@@ -77,6 +93,8 @@ function parseArgs(argv) {
     ["--catalog", "catalog"],
     ["--tiers", "tiers"],
     ["--default-model", "defaultModel"],
+    ["--provider", "provider"],
+    ["--base-url", "baseUrl"],
   ])
   const unsupportedDesktopOptions = new Set([
     "--app",
@@ -101,6 +119,14 @@ function parseArgs(argv) {
     }
     if (argument === "--dry-run") {
       options.dryRun = true
+      continue
+    }
+    if (argument === "--guided") {
+      options.guided = true
+      continue
+    }
+    if (argument === "--skip-provider-config") {
+      options.skipProviderConfig = true
       continue
     }
     if (argument === "--self-test") {
@@ -272,6 +298,10 @@ function setTomlValue(text, key, value) {
   return pattern.test(text) ? text.replace(pattern, line) : `${line}\n${text}`
 }
 
+function tomlString(value) {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
@@ -291,9 +321,87 @@ function providerSectionBounds(text, provider) {
   return [match.index, end]
 }
 
-function enableNoChatgptLoginMode(text) {
-  const provider = activeModelProvider(text)
-  if (!provider || new Set(["openai", "chatgpt"]).has(provider.toLowerCase())) {
+function sectionValue(section, key) {
+  const pattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*["']([^"']*)["']\\s*(?:#.*)?$`, "m")
+  return pattern.exec(section)?.[1] ?? null
+}
+
+function insertAfterSectionHeader(section, line) {
+  const headerEnd = section.indexOf("\n")
+  if (headerEnd < 0) return `${section}\n${line}\n`
+  return `${section.slice(0, headerEnd + 1)}${line}\n${section.slice(headerEnd + 1)}`
+}
+
+function setSectionStringValue(section, key, value, { force }) {
+  const pattern = new RegExp(`^(\\s*${escapeRegExp(key)}\\s*=\\s*)(["'])([^"']*)(["'])(\\s*(?:#.*)?)$`, "m")
+  if (pattern.test(section)) {
+    if (!force) return { section, changed: false }
+    const updated = section.replace(pattern, (_match, prefix, _openQuote, _oldValue, _closeQuote, suffix) => {
+      return `${prefix}${tomlString(value)}${suffix}`
+    })
+    return { section: updated, changed: updated !== section }
+  }
+  return {
+    section: insertAfterSectionHeader(section, `${key} = ${tomlString(value)}`),
+    changed: true,
+  }
+}
+
+function configureDefaultProvider(text, options) {
+  const active = activeModelProvider(text)
+  const provider = (options.provider || DEFAULT_PROVIDER).trim()
+  const baseUrl = (options.baseUrl || DEFAULT_BASE_URL).trim()
+  if (!provider) fail("--provider cannot be empty")
+  if (!baseUrl) fail("--base-url cannot be empty")
+
+  let targetProvider = active
+  let rootChanged = false
+  if (options.provider || !active || OFFICIAL_PROVIDERS.has(active.toLowerCase())) {
+    targetProvider = provider
+    const updated = setTomlValue(text, "model_provider", targetProvider)
+    rootChanged = updated !== text
+    text = updated
+  }
+
+  const bounds = providerSectionBounds(text, targetProvider)
+  if (!bounds) {
+    const suffix = !text || text.endsWith("\n") ? "" : "\n"
+    const section =
+      `\n[model_providers.${targetProvider}]\n` +
+      `name = ${tomlString(targetProvider)}\n` +
+      `base_url = ${tomlString(baseUrl)}\n` +
+      `wire_api = ${tomlString(DEFAULT_WIRE_API)}\n` +
+      `env_key = ${tomlString(DEFAULT_ENV_KEY)}\n` +
+      "requires_openai_auth = false\n"
+    return { text: `${text}${suffix}${section}`, changed: true, provider: targetProvider }
+  }
+
+  const [start, end] = bounds
+  let section = text.slice(start, end)
+  let sectionChanged = false
+  const existingBaseUrl = sectionValue(section, "base_url")
+  let forceBaseUrl = Boolean(options.baseUrl) || !existingBaseUrl
+  if (existingBaseUrl && /^https:\/\/api\.openai\.com(?:\/|$)/i.test(existingBaseUrl)) {
+    forceBaseUrl = true
+  }
+
+  for (const [key, value, force] of [
+    ["name", targetProvider, false],
+    ["base_url", baseUrl, forceBaseUrl],
+    ["wire_api", DEFAULT_WIRE_API, false],
+    ["env_key", DEFAULT_ENV_KEY, false],
+  ]) {
+    const result = setSectionStringValue(section, key, value, { force })
+    section = result.section
+    sectionChanged ||= result.changed
+  }
+  if (sectionChanged) text = `${text.slice(0, start)}${section}${text.slice(end)}`
+  return { text, changed: rootChanged || sectionChanged, provider: targetProvider }
+}
+
+function enableNoChatgptLoginMode(text, provider = null) {
+  provider ??= activeModelProvider(text)
+  if (!provider || OFFICIAL_PROVIDERS.has(provider.toLowerCase())) {
     return { text, changed: false, provider: null }
   }
   const bounds = providerSectionBounds(text, provider)
@@ -348,12 +456,21 @@ function configure(options) {
     configText = setTomlValue(configText, "model", MODEL_TIERS[options.defaultModel][0])
     configChanged = true
   }
-  const noLoginResult = enableNoChatgptLoginMode(configText)
+  let providerResult = { text: configText, changed: false, provider: null }
+  if (!options.skipProviderConfig) {
+    providerResult = configureDefaultProvider(configText, options)
+    configText = providerResult.text
+    configChanged = configChanged || providerResult.changed
+  }
+  const noLoginResult = enableNoChatgptLoginMode(configText, providerResult.provider)
   configText = noLoginResult.text
   configChanged = configChanged || noLoginResult.changed
   if (configChanged) {
     backupFile(configPath)
     fs.writeFileSync(configPath, configText, "utf8")
+    if (providerResult.changed) {
+      log(`Model provider ready: ${providerResult.provider}`)
+    }
     if (noLoginResult.changed) {
       log(`Enabled API-key/no-ChatGPT-login mode for provider: ${noLoginResult.provider}`)
     }
@@ -430,10 +547,65 @@ function selfTest() {
   }
 }
 
+async function askYesNo(rl, question, defaultYes) {
+  const suffix = defaultYes ? "[Y/n]" : "[y/N]"
+  const yesValues = new Set(["y", "yes", "1", "true", "是", "好", "确定"])
+  const noValues = new Set(["n", "no", "0", "false", "否", "不"])
+  while (true) {
+    const answer = (await rl.question(`${question} ${suffix} `)).trim().toLowerCase()
+    if (!answer) return defaultYes
+    if (yesValues.has(answer)) return true
+    if (noValues.has(answer)) return false
+    console.log("Please answer y or n.")
+  }
+}
+
+async function askText(rl, question, defaultValue) {
+  const answer = (await rl.question(`${question}\n  Default: ${defaultValue}\n> `)).trim()
+  return answer || defaultValue
+}
+
+async function guidedSetup(options) {
+  if (!process.stdin.isTTY) {
+    log("Guided mode requested, but stdin is not interactive; continuing with default answers.")
+    return
+  }
+  const rl = readline.createInterface({ input, output })
+  try {
+    log("Guided configuration mode. This fallback updates config only; it does not patch Desktop UI.")
+    const provider = options.provider || DEFAULT_PROVIDER
+    const baseUrl = options.baseUrl || DEFAULT_BASE_URL
+    if (await askYesNo(rl, `Configure API-key provider '${provider}' with base_url?\n  ${baseUrl}`, true)) {
+      options.provider = provider
+      if (!options.baseUrl) {
+        if (await askYesNo(rl, `Use default relay base_url?\n  ${DEFAULT_BASE_URL}`, true)) {
+          options.baseUrl = DEFAULT_BASE_URL
+        } else {
+          options.baseUrl = await askText(rl, "Enter custom base_url", DEFAULT_BASE_URL)
+        }
+      }
+    } else {
+      options.skipProviderConfig = true
+    }
+    if (options.enableUltra && !(await askYesNo(rl, "Show Ultra reasoning effort in the model catalog?", true))) {
+      options.enableUltra = false
+    }
+    if (!(await askYesNo(rl, "Start now?", true))) {
+      log("Cancelled")
+      process.exit(1)
+    }
+  } finally {
+    rl.close()
+  }
+}
+
 try {
   const options = parseArgs(process.argv.slice(2))
   if (options.selfTest) selfTest()
-  else configure(options)
+  else {
+    if (options.guided) await guidedSetup(options)
+    configure(options)
+  }
 } catch (error) {
   console.error(`[codex-gpt56-config] ERROR: ${error.message}`)
   process.exitCode = 1

@@ -44,6 +44,11 @@ EFFORT_DESCRIPTIONS = {
     "max": "Maximum reasoning depth for the hardest problems",
     "ultra": "Ultra parallel reasoning; requires explicit provider support",
 }
+DEFAULT_PROVIDER = "custom"
+DEFAULT_BASE_URL = "https://ai.heigh.vip/v1"
+DEFAULT_WIRE_API = "responses"
+DEFAULT_ENV_KEY = "CODEX_CUSTOM_API_KEY"
+OFFICIAL_PROVIDERS = {"openai", "chatgpt"}
 
 
 @dataclass
@@ -733,15 +738,23 @@ def read_catalog_setting(config_path: Path) -> str | None:
     return match.group(1) if match else None
 
 
+def toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_toml_string_value(text: str, key: str, value: str) -> tuple[str, bool]:
+    line = f"{key} = {toml_string(value)}"
+    pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*$")
+    if pattern.search(text):
+        updated = pattern.sub(line, text, count=1)
+    else:
+        updated = line + "\n" + text
+    return updated, updated != text
+
+
 def set_catalog_setting(config_path: Path, value: str) -> None:
     text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    line = f'model_catalog_json = "{escaped}"'
-    pattern = re.compile(r'(?m)^\s*model_catalog_json\s*=.*$')
-    if pattern.search(text):
-        text = pattern.sub(line, text, count=1)
-    else:
-        text = line + "\n" + text
+    text, _ = set_toml_string_value(text, "model_catalog_json", value)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(text, encoding="utf-8")
 
@@ -889,44 +902,125 @@ def provider_section_bounds(text: str, provider: str) -> tuple[int, int] | None:
     return match.start(), end
 
 
-def enable_no_chatgpt_login_mode(config_path: Path) -> bool:
-    """Set requires_openai_auth=false only for the active non-OpenAI provider."""
-    if not config_path.exists():
-        return False
-    text = config_path.read_text(encoding="utf-8")
-    provider = active_model_provider(text)
-    if not provider or provider.lower() in {"openai", "chatgpt"}:
-        return False
+def section_value(section: str, key: str) -> str | None:
+    match = re.search(rf'(?m)^\s*{re.escape(key)}\s*=\s*["\']([^"\']*)["\']\s*(?:#.*)?$', section)
+    return match.group(1) if match else None
+
+
+def insert_after_section_header(section: str, line: str) -> str:
+    header_end = section.find("\n")
+    if header_end < 0:
+        return section + "\n" + line + "\n"
+    return section[: header_end + 1] + line + "\n" + section[header_end + 1 :]
+
+
+def set_section_string_value(section: str, key: str, value: str, *, force: bool) -> tuple[str, bool]:
+    pattern = re.compile(
+        rf'(?m)^(\s*{re.escape(key)}\s*=\s*)(["\'])([^"\']*)(["\'])(\s*(?:#.*)?)$'
+    )
+    if pattern.search(section):
+        if not force:
+            return section, False
+        line_value = toml_string(value)
+
+        def replace(match: re.Match[str]) -> str:
+            return f"{match.group(1)}{line_value}{match.group(5)}"
+
+        updated = pattern.sub(replace, section, count=1)
+        return updated, updated != section
+    updated = insert_after_section_header(section, f"{key} = {toml_string(value)}")
+    return updated, True
+
+
+def configure_default_provider_text(
+    text: str,
+    *,
+    provider: str,
+    base_url: str,
+    force_provider: bool = False,
+    force_base_url: bool = False,
+) -> tuple[str, bool, str]:
+    active = active_model_provider(text)
+    if force_provider or not active or active.lower() in OFFICIAL_PROVIDERS:
+        target_provider = provider
+        text, root_changed = set_toml_string_value(text, "model_provider", target_provider)
+    else:
+        target_provider = active
+        root_changed = False
+
+    bounds = provider_section_bounds(text, target_provider)
+    if not bounds:
+        suffix = "" if not text or text.endswith("\n") else "\n"
+        section = (
+            f"\n[model_providers.{target_provider}]\n"
+            f"name = {toml_string(target_provider)}\n"
+            f"base_url = {toml_string(base_url)}\n"
+            f"wire_api = {toml_string(DEFAULT_WIRE_API)}\n"
+            f"env_key = {toml_string(DEFAULT_ENV_KEY)}\n"
+            "requires_openai_auth = false\n"
+        )
+        return text + suffix + section, True, target_provider
+
+    start, end = bounds
+    section = text[start:end]
+    section_changed = False
+    existing_base_url = section_value(section, "base_url")
+    should_force_base_url = force_base_url or not existing_base_url
+    if existing_base_url and re.match(r"https://api\.openai\.com(?:/|$)", existing_base_url, re.I):
+        should_force_base_url = True
+
+    for key, value, force in [
+        ("name", target_provider, False),
+        ("base_url", base_url, should_force_base_url),
+        ("wire_api", DEFAULT_WIRE_API, False),
+        ("env_key", DEFAULT_ENV_KEY, False),
+    ]:
+        section, changed = set_section_string_value(section, key, value, force=force)
+        section_changed = section_changed or changed
+
+    if section_changed:
+        text = text[:start] + section + text[end:]
+    return text, root_changed or section_changed, target_provider
+
+
+def enable_no_chatgpt_login_mode_text(text: str, provider: str | None = None) -> tuple[str, bool, str | None]:
+    provider = provider or active_model_provider(text)
+    if not provider or provider.lower() in OFFICIAL_PROVIDERS:
+        return text, False, None
     bounds = provider_section_bounds(text, provider)
     if not bounds:
         fail(f"Active model provider section was not found: [model_providers.{provider}]")
     start, end = bounds
     section = text[start:end]
     base_match = re.search(r'(?m)^\s*base_url\s*=\s*["\']([^"\']+)["\']\s*$', section)
-    if base_match and re.match(r'https://api\.openai\.com(?:/|$)', base_match.group(1), re.I):
-        return False
-    pattern = re.compile(r'(?m)^(\s*requires_openai_auth\s*=\s*)(?:true|false)(\s*(?:#.*)?)$')
+    if base_match and re.match(r"https://api\.openai\.com(?:/|$)", base_match.group(1), re.I):
+        return text, False, None
+    pattern = re.compile(r"(?m)^(\s*requires_openai_auth\s*=\s*)(?:true|false)(\s*(?:#.*)?)$")
     if pattern.search(section):
-        updated = pattern.sub(r'\1false\2', section, count=1)
+        updated = pattern.sub(r"\1false\2", section, count=1)
     else:
-        header_end = section.find("\n")
-        insertion = len(section) if header_end < 0 else header_end + 1
-        updated = section[:insertion] + "requires_openai_auth = false\n" + section[insertion:]
+        updated = insert_after_section_header(section, "requires_openai_auth = false")
     if updated == section:
+        return text, False, None
+    return text[:start] + updated + text[end:], True, provider
+
+
+def enable_no_chatgpt_login_mode(config_path: Path) -> bool:
+    """Set requires_openai_auth=false only for the active non-OpenAI provider."""
+    if not config_path.exists():
         return False
-    config_path.write_text(text[:start] + updated + text[end:], encoding="utf-8")
+    text = config_path.read_text(encoding="utf-8")
+    text, changed, provider = enable_no_chatgpt_login_mode_text(text)
+    if not changed:
+        return False
+    config_path.write_text(text, encoding="utf-8")
     log(f"Enabled API-key/no-ChatGPT-login mode for provider: {provider}")
     return True
 
 
 def update_default_model(config_path: Path, slug: str) -> None:
     text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    line = f'model = "{slug}"'
-    pattern = re.compile(r'(?m)^\s*model\s*=.*$')
-    if pattern.search(text):
-        text = pattern.sub(line, text, count=1)
-    else:
-        text = line + "\n" + text
+    text, _ = set_toml_string_value(text, "model", slug)
     config_path.write_text(text, encoding="utf-8")
 
 
@@ -1144,6 +1238,98 @@ def self_test() -> None:
     log("Self-test passed")
 
 
+def prompt_yes_no(question: str, *, default: bool) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    yes_values = {"y", "yes", "1", "true", "t", "是", "好", "确定"}
+    no_values = {"n", "no", "0", "false", "f", "否", "不"}
+    while True:
+        answer = input(f"{question} {suffix} ").strip().lower()
+        if not answer:
+            return default
+        if answer in yes_values:
+            return True
+        if answer in no_values:
+            return False
+        print("Please answer y or n.")
+
+
+def prompt_text(question: str, *, default: str | None = None) -> str:
+    if default:
+        answer = input(f"{question}\n  Default: {default}\n> ").strip()
+        return answer or default
+    while True:
+        answer = input(f"{question}\n> ").strip()
+        if answer:
+            return answer
+        print("This value cannot be empty.")
+
+
+def guided_setup(args: argparse.Namespace) -> bool:
+    if not sys.stdin.isatty():
+        log("Guided mode requested, but stdin is not interactive; continuing with default answers.")
+        args.yes = True
+        return True
+
+    log("Guided setup started. Press Enter to accept the default in brackets.")
+    if not args.catalog_only and not args.desktop_only:
+        if not prompt_yes_no("Patch Desktop UI as well as model config?", default=True):
+            args.catalog_only = True
+
+    detected_layout: AppLayout | None = None
+    if not args.catalog_only:
+        if args.app:
+            detected_layout = detect_layout(args.app)
+            log(f"Using source app from --app: {detected_layout.root}")
+        else:
+            try:
+                detected_layout = detect_layout(None)
+                if prompt_yes_no(f"Detected source app:\n  {detected_layout.root}\nUse this install directory?", default=True):
+                    args.app = str(detected_layout.root)
+                else:
+                    args.app = prompt_text("Enter the Codex/Codex.app/AppImage/app.asar source path")
+                    detected_layout = detect_layout(args.app)
+            except RuntimeError as exc:
+                log(str(exc))
+                args.app = prompt_text("Enter the Codex/Codex.app/AppImage/app.asar source path")
+                detected_layout = detect_layout(args.app)
+
+        if args.output:
+            log(f"Using patched clone path from --output: {expand(args.output)}")
+        else:
+            assert detected_layout is not None
+            default_destination = default_output(detected_layout)
+            if prompt_yes_no(f"Create/update the patched Codex clone here?\n  {default_destination}", default=True):
+                args.output = str(default_destination)
+            else:
+                args.output = prompt_text("Enter the new patched clone install path", default=str(default_destination))
+            log(f"Patched clone install path: {expand(args.output)}")
+
+    if not args.desktop_only and not args.skip_provider_config:
+        provider_name = args.provider or DEFAULT_PROVIDER
+        provider_base_url = args.base_url or DEFAULT_BASE_URL
+        if prompt_yes_no(
+            f"Configure API-key provider '{provider_name}' with base_url?\n  {provider_base_url}",
+            default=True,
+        ):
+            args.provider = provider_name
+            if not args.base_url:
+                if prompt_yes_no(f"Use default relay base_url?\n  {DEFAULT_BASE_URL}", default=True):
+                    args.base_url = DEFAULT_BASE_URL
+                else:
+                    args.base_url = prompt_text("Enter custom base_url", default=DEFAULT_BASE_URL)
+        else:
+            args.skip_provider_config = True
+
+        if args.enable_ultra and not prompt_yes_no("Show Ultra reasoning effort in the model picker?", default=True):
+            args.enable_ultra = False
+
+    if not prompt_yes_no("Start now?", default=True):
+        log("Cancelled")
+        return False
+    args.yes = True
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create a separate Codex Desktop copy that shows third-party GPT-5.6 models and Max reasoning."
@@ -1151,6 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app", help="Official app, AppImage, executable, app directory, or app.asar path")
     parser.add_argument("--output", help="Destination for the separate patched application")
     parser.add_argument("--catalog", help="Explicit Codex model catalog JSON path")
+    parser.add_argument("--guided", action="store_true", help="Start a beginner-friendly interactive setup")
     parser.add_argument("--tiers", default="sol,terra,luna", help="Comma-separated tiers: sol,terra,luna")
     parser.add_argument(
         "--default-model",
@@ -1173,6 +1360,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(enable_ultra=True)
     parser.add_argument("--desktop-only", action="store_true", help="Patch app.asar but do not update the model catalog")
     parser.add_argument("--catalog-only", action="store_true", help="Update the catalog but do not copy or patch Desktop")
+    parser.add_argument("--provider", help=f"Model provider name to create or activate; default is {DEFAULT_PROVIDER}")
+    parser.add_argument("--base-url", help=f"Provider base_url to write when creating or explicitly updating a provider; default is {DEFAULT_BASE_URL}")
+    parser.add_argument("--skip-provider-config", action="store_true", help="Do not create or update model_provider/base_url settings")
     parser.add_argument("--dry-run", action="store_true", help="Detect and report without writing changes")
     parser.add_argument("--yes", action="store_true", help="Run without an interactive confirmation")
     parser.add_argument("--verify-only", action="store_true", help="Verify an existing patched application and catalog")
@@ -1187,6 +1377,8 @@ def main() -> int:
         return 0
     if args.desktop_only and args.catalog_only:
         fail("--desktop-only and --catalog-only cannot be used together")
+    if args.guided and not args.verify_only and not guided_setup(args):
+        return 1
     if args.enable_ultra:
         log("Full reasoning mode enabled: low, medium, high, xhigh, max, ultra. Provider must accept the selected effort.")
 
@@ -1256,28 +1448,44 @@ def main() -> int:
                 cli=cli or (locate_cli(layout) if layout else None),
                 dry_run=False,
             )
-            config_will_change = needs_catalog_setting or args.default_model != "keep"
-            no_login_change_needed = False
-            if config_path.exists():
-                config_text = config_path.read_text(encoding="utf-8")
-                provider = active_model_provider(config_text)
-                if provider and provider.lower() not in {"openai", "chatgpt"}:
-                    bounds = provider_section_bounds(config_text, provider)
-                    if bounds:
-                        section = config_text[bounds[0] : bounds[1]]
-                        no_login_change_needed = not re.search(
-                            r'(?m)^\s*requires_openai_auth\s*=\s*false\s*(?:#.*)?$', section
-                        )
-            config_will_change = config_will_change or no_login_change_needed
-            if config_will_change:
-                backup_file(config_path)
+            config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+            updated_config = config_text
             if needs_catalog_setting:
-                set_catalog_setting(config_path, str(catalog_path))
-                log(f"Added model_catalog_json to {config_path}")
-            enable_no_chatgpt_login_mode(config_path)
+                updated_config, _ = set_toml_string_value(updated_config, "model_catalog_json", str(catalog_path))
+            configured_provider: str | None = None
+            provider_changed = False
+            if not args.skip_provider_config:
+                provider_name = (args.provider or DEFAULT_PROVIDER).strip()
+                base_url = (args.base_url or DEFAULT_BASE_URL).strip()
+                if not provider_name:
+                    fail("--provider cannot be empty")
+                if not base_url:
+                    fail("--base-url cannot be empty")
+                updated_config, provider_changed, configured_provider = configure_default_provider_text(
+                    updated_config,
+                    provider=provider_name,
+                    base_url=base_url,
+                    force_provider=args.provider is not None,
+                    force_base_url=args.base_url is not None,
+                )
+            updated_config, no_login_changed, no_login_provider = enable_no_chatgpt_login_mode_text(
+                updated_config,
+                configured_provider,
+            )
             if args.default_model != "keep":
-                update_default_model(config_path, MODEL_TIERS[args.default_model][0])
-                log(f"Default model set to {MODEL_TIERS[args.default_model][0]}")
+                updated_config, _ = set_toml_string_value(updated_config, "model", MODEL_TIERS[args.default_model][0])
+            if updated_config != config_text:
+                backup_file(config_path)
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(updated_config, encoding="utf-8")
+                if needs_catalog_setting:
+                    log(f"Added model_catalog_json to {config_path}")
+                if provider_changed:
+                    log(f"Model provider ready: {configured_provider}")
+                if no_login_changed:
+                    log(f"Enabled API-key/no-ChatGPT-login mode for provider: {no_login_provider}")
+                if args.default_model != "keep":
+                    log(f"Default model set to {MODEL_TIERS[args.default_model][0]}")
 
         verification_cli = cli or (locate_cli(layout) if layout else None)
         if verification_cli and not args.desktop_only:

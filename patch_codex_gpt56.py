@@ -702,8 +702,6 @@ def patch_asar(layout: AppLayout, *, enable_ultra: bool, temp_root: Path) -> Pat
             fail("Model account allowlist condition still exists after in-place update")
         if REASONING_FILTER_RE.search(verified_text):
             fail("Reasoning account allowlist condition still exists after in-place update")
-        if enable_ultra and REASONING_FILTER_RE.search(verified_text):
-            fail("Reasoning allowlist still blocks full reasoning mode")
         if not enable_ultra and "!==`ultra`" not in verified_text:
             fail("Ultra exclusion is missing from the patched bundle")
     except Exception:
@@ -751,6 +749,7 @@ def set_catalog_setting(config_path: Path, value: str) -> None:
 def locate_cli(layout: AppLayout) -> Path | None:
     candidates = []
     if platform_name() == "windows":
+        candidates.extend([layout.root / "resources" / "codex.exe"])
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
             runtime_candidates = [
@@ -760,7 +759,6 @@ def locate_cli(layout: AppLayout) -> Path | None:
             runtime_candidates = [path for path in runtime_candidates if path.is_file()]
             runtime_candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
             candidates.extend(runtime_candidates)
-        candidates.extend([layout.root / "resources" / "codex.exe"])
     elif platform_name() == "macos":
         candidates.extend([layout.root / "Contents" / "Resources" / "codex"])
     else:

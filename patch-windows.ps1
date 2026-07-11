@@ -82,6 +82,14 @@ function Invoke-StorePatch([string]$filePath, [string[]]$baseArgs) {
     }
 }
 
+function Get-StoreLaunchIdentity {
+    $package = Get-AppxPackage OpenAI.Codex -ErrorAction SilentlyContinue
+    if ($null -eq $package) {
+        return $null
+    }
+    return "$($package.PackageFamilyName)!App"
+}
+
 $py = Get-Command py -ErrorAction SilentlyContinue
 $python = Get-Command python -ErrorAction SilentlyContinue
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -163,8 +171,14 @@ if ($storeMode -and -not (Has-Argument "--dry-run")) {
         }
     }
 
-    Write-Host "Launching the original ChatGPT shortcut identity..."
-    Start-Process explorer.exe "shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
+    $launchIdentity = Get-StoreLaunchIdentity
+    if ([string]::IsNullOrWhiteSpace($launchIdentity)) {
+        Write-Host "WARNING: Could not resolve the installed Store shortcut identity; launch skipped."
+    }
+    else {
+        Write-Host "Launching Store shortcut identity: $launchIdentity"
+        Start-Process explorer.exe "shell:AppsFolder\$launchIdentity"
+    }
     exit 0
 }
 

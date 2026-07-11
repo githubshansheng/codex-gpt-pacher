@@ -117,6 +117,8 @@ OpenAI.Codex_2p2nqsd0c76g0!App
 %USERPROFILE%\.codex\backups\codex-gpt56\store-packages
 ```
 
+成功部署并完成哈希校验后，临时构建目录 `<磁盘>:\CodexGPT56Patcher\build-*` 会自动清理；如果打包、签名或部署失败，构建目录会保留，方便排查和手动清理。最终可回退的安装包仍保留在 `packages` 目录中。
+
 如需绕过 Store 同身份更新流程，也可以显式使用 `--output` 创建独立副本。
 
 ### 2. 修改模型白名单过滤
@@ -459,6 +461,14 @@ MSIX 重打包需要 `makeappx.exe` 和 `signtool.exe`。脚本会优先使用�
 下载的打包工具会缓存到 `%LOCALAPPDATA%\CodexGPT56Patcher\tools\Microsoft.Windows.SDK.BuildTools\<version>`。如果没有 `%LOCALAPPDATA%`，会退到 `%TEMP%\CodexGPT56Patcher\tools`。首次自动下载需要能访问 `api.nuget.org`，无需单独安装完整 SDK。
 
 构建阶段需要某个磁盘至少约 8GB 可用空间，系统盘安装阶段需要至少约 3GB 可用空间。
+
+脚本会为本机创建或复用友好名称为 `Codex GPT56 Local MSIX` 的本地签名证书。该证书只用于给本机生成的同身份 MSIX 更新包签名；如果证书尚未存在于 `LocalMachine\TrustedPeople`，脚本会导入一次。以后不再使用 Store/MSIX 同身份补丁时，可以根据部署记录里的 `signingCertificateThumbprint`，在管理员 PowerShell 中移除该本地信任证书：
+
+```powershell
+$metadata = Get-Content "$env:USERPROFILE\.codex\backups\codex-gpt56\store-packages\YYYYMMDD-HHMMSS.json" | ConvertFrom-Json
+Get-ChildItem "Cert:\LocalMachine\TrustedPeople\$($metadata.signingCertificateThumbprint)" |
+  Remove-Item
+```
 
 注意：Microsoft Store 更新或重新安装可能覆盖本地签名更新包。遇到这种情况重新运行补丁，或显式改用独立副本模式：
 

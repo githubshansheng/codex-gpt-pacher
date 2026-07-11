@@ -301,6 +301,7 @@ if ($systemDrive.Free -lt $minimumSystemFree) {
 $sdkTools = Resolve-WindowsSdkTools
 $makeAppx = [string]$sdkTools.MakeAppx
 $signTool = [string]$sdkTools.SignTool
+$packageArchitecture = Get-WindowsSdkArchitecture
 
 $workDrive = Select-WorkDrive 8GB
 $artifactRoot = Join-Path $workDrive.Root "CodexGPT56Patcher"
@@ -379,7 +380,7 @@ finally {
 }
 
 $certificate = Get-OrCreateSigningCertificate $publisher $certificatePath
-$msixPath = Join-Path $packageRoot ("OpenAI.Codex.GPT56_{0}_x64.msix" -f $newVersion)
+$msixPath = Join-Path $packageRoot ("OpenAI.Codex.GPT56_{0}_{1}.msix" -f $newVersion, $packageArchitecture)
 if (Test-Path -LiteralPath $msixPath) {
     [System.IO.File]::Delete($msixPath)
 }
@@ -436,6 +437,8 @@ $metadata = [ordered]@{
     previousPackage = $package.PackageFullName
     installedPackage = $installed.PackageFullName
     packageFamilyName = $installed.PackageFamilyName
+    launchIdentity = "$($installed.PackageFamilyName)!App"
+    architecture = $packageArchitecture
     msixPath = $msixPath
     installedAsarSha256 = $installedHash
     signingCertificateThumbprint = $certificate.Thumbprint
@@ -452,3 +455,12 @@ Write-Host "Package: $($installed.PackageFullName)"
 Write-Host "Original shortcut identity: $($installed.PackageFamilyName)!App"
 Write-Host "MSIX artifact: $msixPath"
 Write-Host "Installed ASAR SHA256: $installedHash"
+
+try {
+    Remove-Item -LiteralPath $workRoot -Recurse -Force
+    Write-Host "Cleaned temporary build directory: $workRoot"
+}
+catch {
+    Write-Host "WARNING: Could not remove temporary build directory: $workRoot"
+    Write-Host $_.Exception.Message
+}

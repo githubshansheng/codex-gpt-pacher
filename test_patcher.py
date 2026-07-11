@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -62,6 +65,73 @@ class FullNoLoginModeTests(unittest.TestCase):
             changed = patcher.enable_no_chatgpt_login_mode(config)
             self.assertFalse(changed)
             self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_windows_invocation_json_round_trips_chinese_paths(self):
+        shell = shutil.which("powershell") or shutil.which("pwsh")
+        if shell is None:
+            self.skipTest("PowerShell is not available")
+        script = r'''
+$ErrorActionPreference = "Stop"
+$path = Join-Path $env:TEMP ("codex-gpt56-json-{0}.json" -f [guid]::NewGuid().ToString("N"))
+$expected = "C:\Users\郑瑞雪\Downloads\codex-gpt56-patcher\patch_codex_gpt56.py"
+try {
+    $invocation = [ordered]@{
+        patchScript = $expected
+        pythonPath = "C:\Windows\py.exe"
+        pythonBaseArgs = @("-3")
+        disableUltra = $false
+    }
+    [System.IO.File]::WriteAllText(
+        $path,
+        ($invocation | ConvertTo-Json -Depth 4),
+        [System.Text.UTF8Encoding]::new($true)
+    )
+    $json = [System.IO.File]::ReadAllText(
+        $path,
+        [System.Text.UTF8Encoding]::new($true, $true)
+    )
+    $parsed = $json | ConvertFrom-Json
+    if ([string]$parsed.patchScript -ne $expected) {
+        throw "Chinese path did not round-trip correctly: $($parsed.patchScript)"
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $path) {
+        [System.IO.File]::Delete($path)
+    }
+}
+'''
+        result = subprocess.run(
+            [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_windows_locate_cli_prefers_layout_cli_over_runtime_cache(self):
+        old_platform_name = patcher.platform_name
+        old_local_app_data = os.environ.get("LOCALAPPDATA")
+        try:
+            patcher.platform_name = lambda: "windows"
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_cli = root / "app" / "resources" / "codex.exe"
+                runtime_cli = root / "local" / "OpenAI" / "Codex" / "bin" / "999" / "codex.exe"
+                layout_cli.parent.mkdir(parents=True)
+                runtime_cli.parent.mkdir(parents=True)
+                layout_cli.write_text("layout", encoding="utf-8")
+                runtime_cli.write_text("runtime", encoding="utf-8")
+                os.environ["LOCALAPPDATA"] = str(root / "local")
+                layout = patcher.AppLayout("windows_dir", root / "app", root / "app" / "resources" / "app.asar", root / "app")
+                self.assertEqual(patcher.locate_cli(layout), layout_cli)
+        finally:
+            patcher.platform_name = old_platform_name
+            if old_local_app_data is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = old_local_app_data
 
 
 if __name__ == "__main__":
